@@ -1,0 +1,436 @@
+#!/bin/bash
+# worktrack - Automatic time tracking for git repos
+# Watches file changes and logs work sessions
+
+WORKTRACK_DIR="$HOME/.worktrack"
+IDLE_TIMEOUT=900  # 15 minutes in seconds
+REGISTERED_FILE="$WORKTRACK_DIR/.registered"
+
+mkdir -p "$WORKTRACK_DIR"
+touch "$REGISTERED_FILE"
+
+get_repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+get_repo_id() {
+  basename "$(get_repo_root)"
+}
+
+get_pid_file() {
+  echo "$WORKTRACK_DIR/.$(get_repo_id).pid"
+}
+
+get_watchdog_file() {
+  echo "$WORKTRACK_DIR/.$(get_repo_id).watchdog"
+}
+
+get_activity_file() {
+  echo "$WORKTRACK_DIR/.$(get_repo_id).activity"
+}
+
+get_session_file() {
+  echo "$WORKTRACK_DIR/.$(get_repo_id).session"
+}
+
+get_log_file() {
+  echo "$WORKTRACK_DIR/$(get_repo_id).jsonl"
+}
+
+start_tracking() {
+  local repo_root=$(get_repo_root)
+  local repo_id=$(get_repo_id)
+  local pid_file=$(get_pid_file)
+  local watchdog_file=$(get_watchdog_file)
+  local activity_file=$(get_activity_file)
+  local session_file=$(get_session_file)
+  local log_file=$(get_log_file)
+
+  # Check if already running
+  if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    echo "Already tracking $repo_id"
+    return 1
+  fi
+
+  # Flush any unsaved session (e.g. processes killed during sleep)
+  if [[ -f "$session_file" ]] && [[ -s "$session_file" ]] && [[ -f "$activity_file" ]]; then
+    local stale_start=$(cat "$session_file")
+    local stale_end=$(cat "$activity_file")
+    if [[ "$stale_start" =~ ^[0-9]+$ ]] && [[ "$stale_end" =~ ^[0-9]+$ ]]; then
+      echo "{\"start\":$stale_start,\"end\":$stale_end,\"repo\":\"$repo_id\"}" >> "$log_file"
+    fi
+  fi
+
+  # Clean up stale state
+  rm -f "$activity_file" "$session_file"
+
+  # Start the file watcher - updates activity timestamp on any change
+  (
+    fswatch -r \
+      -e "\.git" \
+      -e "node_modules" \
+      -e "\.nuxt" \
+      -e "\.output" \
+      -e "\.yarn" \
+      -e "\.next" \
+      -e "dist" \
+      -e "__pycache__" \
+      -e "\.pyc$" \
+      "$repo_root" 2>/dev/null | while read -r; do
+      date +%s > "$activity_file"
+    done
+  ) &
+  echo $! > "$pid_file"
+
+  # Start the watchdog - manages sessions based on activity
+  (
+    while true; do
+      sleep 30
+
+      if [[ ! -f "$activity_file" ]]; then
+        continue
+      fi
+
+      local last_activity=$(cat "$activity_file" 2>/dev/null)
+      if [[ -z "$last_activity" ]]; then
+        continue
+      fi
+
+      local now=$(date +%s)
+      local idle_time=$((now - last_activity))
+
+      # If active (activity within IDLE_TIMEOUT)
+      if (( idle_time < IDLE_TIMEOUT )); then
+        # Start session if not already started
+        if [[ ! -f "$session_file" ]] || [[ ! -s "$session_file" ]]; then
+          echo "$last_activity" > "$session_file"
+        fi
+      else
+        # Idle - end session if one exists
+        if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
+          local session_start=$(cat "$session_file")
+          # Session ends at last activity, not now
+          echo "{\"start\":$session_start,\"end\":$last_activity,\"repo\":\"$repo_id\"}" >> "$log_file"
+          rm -f "$session_file"
+        fi
+      fi
+    done
+  ) &
+  echo $! > "$watchdog_file"
+
+  echo "Started tracking $repo_id"
+}
+
+stop_tracking() {
+  local repo_id=$(get_repo_id)
+  local pid_file=$(get_pid_file)
+  local watchdog_file=$(get_watchdog_file)
+  local activity_file=$(get_activity_file)
+  local session_file=$(get_session_file)
+  local log_file=$(get_log_file)
+
+  local was_running=false
+
+  # End current session if exists
+  if [[ -f "$session_file" ]] && [[ -s "$session_file" ]] && [[ -f "$activity_file" ]]; then
+    local session_start=$(cat "$session_file")
+    local last_activity=$(cat "$activity_file")
+    if [[ -n "$session_start" ]] && [[ -n "$last_activity" ]]; then
+      echo "{\"start\":$session_start,\"end\":$last_activity,\"repo\":\"$repo_id\"}" >> "$log_file"
+    fi
+  fi
+
+  # Kill watcher process
+  if [[ -f "$pid_file" ]]; then
+    local pid=$(cat "$pid_file")
+    if kill -0 "$pid" 2>/dev/null; then
+      was_running=true
+      kill "$pid" 2>/dev/null
+      # Kill child processes (fswatch)
+      pkill -P "$pid" 2>/dev/null
+    fi
+    rm -f "$pid_file"
+  fi
+
+  # Kill watchdog process
+  if [[ -f "$watchdog_file" ]]; then
+    local pid=$(cat "$watchdog_file")
+    if kill -0 "$pid" 2>/dev/null; then
+      was_running=true
+      kill "$pid" 2>/dev/null
+    fi
+    rm -f "$watchdog_file"
+  fi
+
+  # Clean up state files
+  rm -f "$activity_file" "$session_file"
+
+  if $was_running; then
+    echo "Stopped tracking $repo_id"
+  else
+    echo "Was not tracking $repo_id"
+  fi
+}
+
+show_status() {
+  local repo_id=$(get_repo_id)
+  local pid_file=$(get_pid_file)
+  local session_file=$(get_session_file)
+  local activity_file=$(get_activity_file)
+  local log_file=$(get_log_file)
+
+  if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    echo "Tracking: $repo_id"
+
+    # Show current session duration
+    if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
+      local session_start=$(cat "$session_file")
+      local now=$(date +%s)
+      local elapsed=$((now - session_start))
+      printf "Session:  %dh %dm\n" $((elapsed/3600)) $(((elapsed%3600)/60))
+    else
+      echo "Session:  idle"
+    fi
+
+    # Show today's total
+    if [[ -f "$log_file" ]]; then
+      local today_start=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%Y-%m-%d) 00:00:00" +%s 2>/dev/null)
+      local today_seconds=0
+
+      while IFS= read -r line; do
+        local s=$(echo "$line" | grep -o '"start":[0-9]*' | cut -d: -f2)
+        local e=$(echo "$line" | grep -o '"end":[0-9]*' | cut -d: -f2)
+        if [[ -n "$s" ]] && [[ -n "$e" ]] && (( s >= today_start )); then
+          today_seconds=$((today_seconds + e - s))
+        fi
+      done < "$log_file"
+
+      # Add current session if active
+      if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
+        local session_start=$(cat "$session_file")
+        if (( session_start >= today_start )); then
+          local now=$(date +%s)
+          today_seconds=$((today_seconds + now - session_start))
+        fi
+      fi
+
+      printf "Today:    %dh %dm\n" $((today_seconds/3600)) $(((today_seconds%3600)/60))
+    fi
+  else
+    echo "Not tracking $repo_id"
+  fi
+}
+
+show_report() {
+  local repo_id=$(get_repo_id)
+  local log_file=$(get_log_file)
+  local month="${1:-$(date +%Y-%m)}"
+
+  if [[ ! -f "$log_file" ]]; then
+    echo "No data for $repo_id"
+    return 1
+  fi
+
+  local year=${month%-*}
+  local mon=${month#*-}
+  local start_ts=$(date -j -f "%Y-%m-%d" "$year-$mon-01" +%s 2>/dev/null)
+
+  # Calculate end of month
+  local next_mon=$((10#$mon + 1))
+  local next_year=$year
+  if (( next_mon > 12 )); then
+    next_mon=1
+    next_year=$((year + 1))
+  fi
+  local end_ts=$(date -j -f "%Y-%m-%d" "$next_year-$(printf %02d $next_mon)-01" +%s 2>/dev/null)
+
+  local total_seconds=0
+  local session_count=0
+
+  while IFS= read -r line; do
+    local s=$(echo "$line" | grep -o '"start":[0-9]*' | cut -d: -f2)
+    local e=$(echo "$line" | grep -o '"end":[0-9]*' | cut -d: -f2)
+    if [[ -n "$s" ]] && [[ -n "$e" ]] && (( s >= start_ts && s < end_ts )); then
+      total_seconds=$((total_seconds + e - s))
+      session_count=$((session_count + 1))
+    fi
+  done < "$log_file"
+
+  echo "$repo_id - $month"
+  printf "Total: %dh %dm (%d sessions)\n" $((total_seconds/3600)) $(((total_seconds%3600)/60)) $session_count
+}
+
+dump_sessions() {
+  local repo_id=$(get_repo_id)
+  local log_file=$(get_log_file)
+  local month="${1:-$(date +%Y-%m)}"
+
+  if [[ ! -f "$log_file" ]]; then
+    echo "[]"
+    return
+  fi
+
+  local year=${month%-*}
+  local mon=${month#*-}
+  local start_ts=$(date -j -f "%Y-%m-%d" "$year-$mon-01" +%s 2>/dev/null)
+
+  local next_mon=$((10#$mon + 1))
+  local next_year=$year
+  if (( next_mon > 12 )); then
+    next_mon=1
+    next_year=$((year + 1))
+  fi
+  local end_ts=$(date -j -f "%Y-%m-%d" "$next_year-$(printf %02d $next_mon)-01" +%s 2>/dev/null)
+
+  echo "["
+  local first=true
+  while IFS= read -r line; do
+    local s=$(echo "$line" | grep -o '"start":[0-9]*' | cut -d: -f2)
+    if [[ -n "$s" ]] && (( s >= start_ts && s < end_ts )); then
+      if $first; then
+        first=false
+      else
+        echo ","
+      fi
+      echo -n "  $line"
+    fi
+  done < "$log_file"
+  echo ""
+  echo "]"
+}
+
+register_repo() {
+  local repo_root=$(get_repo_root)
+
+  if grep -qxF "$repo_root" "$REGISTERED_FILE" 2>/dev/null; then
+    echo "Already registered: $repo_root"
+    return 0
+  fi
+
+  echo "$repo_root" >> "$REGISTERED_FILE"
+  echo "Registered: $repo_root"
+
+  # Also start tracking immediately
+  start_tracking
+}
+
+unregister_repo() {
+  local repo_root=$(get_repo_root)
+
+  if ! grep -qxF "$repo_root" "$REGISTERED_FILE" 2>/dev/null; then
+    echo "Not registered: $repo_root"
+    return 1
+  fi
+
+  grep -vxF "$repo_root" "$REGISTERED_FILE" > "$REGISTERED_FILE.tmp"
+  mv "$REGISTERED_FILE.tmp" "$REGISTERED_FILE"
+  echo "Unregistered: $repo_root"
+
+  # Also stop tracking
+  stop_tracking
+}
+
+list_registered() {
+  if [[ ! -s "$REGISTERED_FILE" ]]; then
+    echo "No repos registered"
+    return
+  fi
+
+  echo "Registered repos:"
+  while IFS= read -r repo; do
+    local name=$(basename "$repo")
+    local pid_file="$WORKTRACK_DIR/.$name.pid"
+    if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+      echo "  $repo (tracking)"
+    else
+      echo "  $repo"
+    fi
+  done < "$REGISTERED_FILE"
+}
+
+# Called by shell hook on cd and precmd
+hook_check() {
+  local current_dir=$(pwd)
+
+  # Check if we're in a registered repo
+  while IFS= read -r repo; do
+    if [[ "$current_dir" == "$repo"* ]]; then
+      local name=$(basename "$repo")
+      local pid_file="$WORKTRACK_DIR/.$name.pid"
+      local activity_file="$WORKTRACK_DIR/.$name.activity"
+
+      # Start tracking if not already running
+      if [[ ! -f "$pid_file" ]] || ! kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        cd "$repo" && start_tracking > /dev/null
+      fi
+
+      # Record terminal activity (keeps session alive even without file writes)
+      date +%s > "$activity_file"
+      return
+    fi
+  done < "$REGISTERED_FILE"
+}
+
+print_shell_hook() {
+  cat << 'HOOK'
+# worktrack shell hook - add to ~/.zshrc
+worktrack_hook() {
+  worktrack hook 2>/dev/null
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd worktrack_hook
+add-zsh-hook precmd worktrack_hook
+HOOK
+}
+
+case "${1:-}" in
+  start)
+    start_tracking
+    ;;
+  stop)
+    stop_tracking
+    ;;
+  status)
+    show_status
+    ;;
+  report)
+    show_report "$2"
+    ;;
+  dump)
+    dump_sessions "$2"
+    ;;
+  register)
+    register_repo
+    ;;
+  unregister)
+    unregister_repo
+    ;;
+  list)
+    list_registered
+    ;;
+  hook)
+    hook_check
+    ;;
+  init)
+    print_shell_hook
+    ;;
+  *)
+    echo "worktrack - Automatic time tracking for git repos"
+    echo ""
+    echo "Usage: worktrack <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  start            Start tracking current repo"
+    echo "  stop             Stop tracking and save session"
+    echo "  status           Show tracking status and today's time"
+    echo "  report [YYYY-MM] Show total time for month (default: current)"
+    echo "  dump [YYYY-MM]   Output raw session data as JSON"
+    echo ""
+    echo "Auto-tracking:"
+    echo "  register         Register current repo for auto-tracking"
+    echo "  unregister       Unregister current repo"
+    echo "  list             Show registered repos"
+    echo "  init             Print shell hook (add to ~/.zshrc)"
+    exit 1
+    ;;
+esac
