@@ -3,6 +3,7 @@
 # Watches file changes and logs work sessions
 
 WORKTRACK_DIR="$HOME/.worktrack"
+WORKTRACK_REPO_DIR="$HOME/Projects/worktrack"
 IDLE_TIMEOUT=900  # 15 minutes in seconds
 REGISTERED_FILE="$WORKTRACK_DIR/.registered"
 
@@ -371,6 +372,21 @@ hook_check() {
   done < "$REGISTERED_FILE"
 }
 
+update_worktrack() {
+  if [[ ! -d "$WORKTRACK_REPO_DIR/.git" ]]; then
+    echo "Repo not found at $WORKTRACK_REPO_DIR"
+    echo "Clone it first: git clone git@github.com:gallop-systems/worktrack.git $WORKTRACK_REPO_DIR"
+    return 1
+  fi
+
+  echo "Pulling latest..."
+  git -C "$WORKTRACK_REPO_DIR" pull --ff-only || { echo "Pull failed"; return 1; }
+
+  cp "$WORKTRACK_REPO_DIR/worktrack" "$HOME/.local/bin/worktrack"
+  chmod +x "$HOME/.local/bin/worktrack"
+  echo "Updated worktrack"
+}
+
 print_shell_hook() {
   cat << 'HOOK'
 # worktrack shell hook - add to ~/.zshrc
@@ -414,6 +430,9 @@ case "${1:-}" in
   init)
     print_shell_hook
     ;;
+  update)
+    update_worktrack
+    ;;
   *)
     echo "worktrack - Automatic time tracking for git repos"
     echo ""
@@ -431,6 +450,9 @@ case "${1:-}" in
     echo "  unregister       Unregister current repo"
     echo "  list             Show registered repos"
     echo "  init             Print shell hook (add to ~/.zshrc)"
+    echo ""
+    echo "Maintenance:"
+    echo "  update           Pull latest from GitHub and reinstall"
     exit 1
     ;;
 esac
