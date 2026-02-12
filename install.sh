@@ -1,7 +1,14 @@
 #!/bin/bash
 # Install worktrack
+# curl -fsSL https://raw.githubusercontent.com/gallop-systems/worktrack/main/install.sh | bash
 
 set -e
+
+REPO="gallop-systems/worktrack"
+INSTALL_DIR="$HOME/.local/bin"
+CLONE_DIR="$HOME/Projects/worktrack"
+
+echo "Installing worktrack..."
 
 # Check dependencies
 if ! command -v fswatch &>/dev/null; then
@@ -14,20 +21,29 @@ if ! command -v fswatch &>/dev/null; then
   fi
 fi
 
-# Install binary
-mkdir -p "$HOME/.local/bin"
-cp worktrack "$HOME/.local/bin/worktrack"
-chmod +x "$HOME/.local/bin/worktrack"
+# Download the script
+mkdir -p "$INSTALL_DIR"
+curl -fsSL "https://raw.githubusercontent.com/$REPO/main/worktrack" -o "$INSTALL_DIR/worktrack"
+chmod +x "$INSTALL_DIR/worktrack"
+
+# Clone repo for `worktrack update` support
+if [[ ! -d "$CLONE_DIR/.git" ]]; then
+  echo "Cloning repo for update support..."
+  mkdir -p "$(dirname "$CLONE_DIR")"
+  git clone "git@github.com:$REPO.git" "$CLONE_DIR" 2>/dev/null || \
+    git clone "https://github.com/$REPO.git" "$CLONE_DIR"
+fi
+
+# Detect shell config
+SHELL_RC=""
+if [[ -f "$HOME/.zshrc" ]]; then
+  SHELL_RC="$HOME/.zshrc"
+elif [[ -f "$HOME/.bashrc" ]]; then
+  SHELL_RC="$HOME/.bashrc"
+fi
 
 # Ensure ~/.local/bin is in PATH
 if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-  SHELL_RC=""
-  if [[ -f "$HOME/.zshrc" ]]; then
-    SHELL_RC="$HOME/.zshrc"
-  elif [[ -f "$HOME/.bashrc" ]]; then
-    SHELL_RC="$HOME/.bashrc"
-  fi
-
   if [[ -n "$SHELL_RC" ]]; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
     echo "Added ~/.local/bin to PATH in $SHELL_RC"
@@ -37,13 +53,6 @@ if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
 fi
 
 # Install shell hook
-SHELL_RC=""
-if [[ -f "$HOME/.zshrc" ]]; then
-  SHELL_RC="$HOME/.zshrc"
-elif [[ -f "$HOME/.bashrc" ]]; then
-  SHELL_RC="$HOME/.bashrc"
-fi
-
 if [[ -n "$SHELL_RC" ]]; then
   if ! grep -q "worktrack_hook" "$SHELL_RC"; then
     cat >> "$SHELL_RC" << 'HOOK'

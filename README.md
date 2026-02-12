@@ -5,28 +5,16 @@ Automatic time tracking for git repos. Tracks work sessions using filesystem wat
 ## Install
 
 ```bash
-git clone git@github.com:gallop-systems/worktrack.git ~/Projects/worktrack
-cd ~/Projects/worktrack
-./install.sh
-```
-
-Or manually:
-
-```bash
-# Copy to PATH
-mkdir -p ~/.local/bin
-cp worktrack ~/.local/bin/worktrack
-chmod +x ~/.local/bin/worktrack
-
-# Add to PATH (if not already)
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-
-# Install the shell hook for auto-tracking
-worktrack init >> ~/.zshrc
-
-# Reload shell
+curl -fsSL https://raw.githubusercontent.com/gallop-systems/worktrack/main/install.sh | bash
 source ~/.zshrc
 ```
+
+This will:
+1. Install `fswatch` (via Homebrew) if not present
+2. Download `worktrack` to `~/.local/bin`
+3. Clone the repo to `~/Projects/worktrack` (for `worktrack update` support)
+4. Add `~/.local/bin` to your PATH
+5. Install the shell hook in `~/.zshrc`
 
 The shell hook does two things:
 - **Auto-starts** tracking when you `cd` into a registered repo
