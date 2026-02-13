@@ -173,31 +173,39 @@ stop_tracking() {
   fi
 }
 
-show_status() {
-  local repo_id=$(get_repo_id)
-  local pid_file=$(get_pid_file)
-  local session_file=$(get_session_file)
-  local activity_file=$(get_activity_file)
-  local log_file=$(get_log_file)
+is_in_registered_repo() {
+  local current_dir=$(pwd)
+  while IFS= read -r repo; do
+    if [[ "$current_dir" == "$repo"* ]]; then
+      return 0
+    fi
+  done < "$REGISTERED_FILE"
+  return 1
+}
+
+_show_status_for() {
+  local name="$1"
+  local pid_file="$WORKTRACK_DIR/.$name.pid"
+  local session_file="$WORKTRACK_DIR/.$name.session"
+  local log_file="$WORKTRACK_DIR/$name.jsonl"
 
   if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-    echo "Tracking: $repo_id"
+    local status_label="tracking"
 
-    # Show current session duration
     if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
       local session_start=$(cat "$session_file")
       local now=$(date +%s)
       local elapsed=$((now - session_start))
-      printf "Session:  %dh %dm\n" $((elapsed/3600)) $(((elapsed%3600)/60))
+      status_label=$(printf "active %dh %dm" $((elapsed/3600)) $(((elapsed%3600)/60)))
     else
-      echo "Session:  idle"
+      status_label="idle"
     fi
 
-    # Show today's total
-    if [[ -f "$log_file" ]]; then
-      local today_start=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%Y-%m-%d) 00:00:00" +%s 2>/dev/null)
-      local today_seconds=0
+    # Calculate today's total
+    local today_start=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%Y-%m-%d) 00:00:00" +%s 2>/dev/null)
+    local today_seconds=0
 
+    if [[ -f "$log_file" ]]; then
       while IFS= read -r line; do
         local s=$(echo "$line" | grep -o '"start":[0-9]*' | cut -d: -f2)
         local e=$(echo "$line" | grep -o '"end":[0-9]*' | cut -d: -f2)
@@ -205,38 +213,52 @@ show_status() {
           today_seconds=$((today_seconds + e - s))
         fi
       done < "$log_file"
-
-      # Add current session if active
-      if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
-        local session_start=$(cat "$session_file")
-        if (( session_start >= today_start )); then
-          local now=$(date +%s)
-          today_seconds=$((today_seconds + now - session_start))
-        fi
-      fi
-
-      printf "Today:    %dh %dm\n" $((today_seconds/3600)) $(((today_seconds%3600)/60))
     fi
+
+    # Add current session if active
+    if [[ -f "$session_file" ]] && [[ -s "$session_file" ]]; then
+      local session_start=$(cat "$session_file")
+      if (( session_start >= today_start )); then
+        local now=$(date +%s)
+        today_seconds=$((today_seconds + now - session_start))
+      fi
+    fi
+
+    printf "%-20s %-18s today: %dh %dm\n" "$name" "$status_label" $((today_seconds/3600)) $(((today_seconds%3600)/60))
   else
-    echo "Not tracking $repo_id"
+    printf "%-20s not tracking\n" "$name"
   fi
 }
 
-show_report() {
-  local repo_id=$(get_repo_id)
-  local log_file=$(get_log_file)
-  local month="${1:-$(date +%Y-%m)}"
+show_status() {
+  if is_in_registered_repo; then
+    _show_status_for "$(get_repo_id)"
+  else
+    # Show all registered repos
+    if [[ ! -s "$REGISTERED_FILE" ]]; then
+      echo "No repos registered"
+      return
+    fi
+    while IFS= read -r repo; do
+      _show_status_for "$(basename "$repo")"
+    done < "$REGISTERED_FILE"
+  fi
+}
+
+_show_report_for() {
+  local name="$1"
+  local month="$2"
+  local log_file="$WORKTRACK_DIR/$name.jsonl"
 
   if [[ ! -f "$log_file" ]]; then
-    echo "No data for $repo_id"
-    return 1
+    printf "%-20s no data\n" "$name"
+    return
   fi
 
   local year=${month%-*}
   local mon=${month#*-}
   local start_ts=$(date -j -f "%Y-%m-%d" "$year-$mon-01" +%s 2>/dev/null)
 
-  # Calculate end of month
   local next_mon=$((10#$mon + 1))
   local next_year=$year
   if (( next_mon > 12 )); then
@@ -257,8 +279,25 @@ show_report() {
     fi
   done < "$log_file"
 
-  echo "$repo_id - $month"
-  printf "Total: %dh %dm (%d sessions)\n" $((total_seconds/3600)) $(((total_seconds%3600)/60)) $session_count
+  printf "%-20s %dh %dm (%d sessions)\n" "$name" $((total_seconds/3600)) $(((total_seconds%3600)/60)) $session_count
+}
+
+show_report() {
+  local month="${1:-$(date +%Y-%m)}"
+
+  if is_in_registered_repo; then
+    echo "$month"
+    _show_report_for "$(get_repo_id)" "$month"
+  else
+    if [[ ! -s "$REGISTERED_FILE" ]]; then
+      echo "No repos registered"
+      return
+    fi
+    echo "$month"
+    while IFS= read -r repo; do
+      _show_report_for "$(basename "$repo")" "$month"
+    done < "$REGISTERED_FILE"
+  fi
 }
 
 dump_sessions() {
